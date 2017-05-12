@@ -12,30 +12,52 @@ entity mc_s2m is
 ---- Entity Generic declaration
 -------------------------------------------------------------------------------
   generic(
-	 gen_log2MemDepth: natural:= 9 --depth of memory buffer
+	 gen_log2MemDepth: natural:= 9; --depth of memory buffer
+	 clk_delays_rvalid : natural := 1 -- the number of clock cycles between arvalid and rvalid (read delay of the BRAM)
 	);
   
 --------------------------------------------------------------------------------
 ---- Entity Port declaration
 --------------------------------------------------------------------------------
-  port(
-    clk_in_clock    : in std_logic := '0';
-    reset_in_reset  : in std_logic := '0';
+  port(	
+		-- Ports of Axi Slave Bus Interface S00_AXIS
+		s00_axis_clock	: in std_logic;
+		s00_axis_aresetn	: in std_logic;
+		
+		s00_axis_tready	: out std_logic;  -- oke
+		s00_axis_tdata	: in std_logic_vector(31 downto 0); -- oke
+		s00_axis_tstrb	: in std_logic_vector(1 downto 0); -- not used
+		s00_axis_tlast	: in std_logic; -- oke
+		s00_axis_tvalid	: in std_logic; -- oke
+		s00_axis_tuser : in std_logic_vector(0 downto 0); -- not used
 
-    asi_st_data  : in std_logic_vector(31 downto 0)  := (others=>'0');
-    asi_st_sop   : in std_logic                      := '0';
-    asi_st_eop   : in std_logic                      := '0';
-    asi_st_empty : in std_logic_vector(1 downto 0)   := (others=>'0');
-    asi_st_ready : out  std_logic                      := '0';
-    asi_st_error : in std_logic_vector(0 downto 0)   := (others=>'0');
-    asi_st_valid : in std_logic                      := '0';
-
-    avs_mm_address    : in  std_logic_vector(gen_log2MemDepth-1 downto 0)  := (others=>'0');
-    avs_mm_irq        : out std_logic                     := '0';
-    avs_mm_read       : in  std_logic                     := '0';
-    avs_mm_readdata   : out std_logic_vector(31 downto 0) := (others=>'0');
-    avs_mm_write      : in  std_logic                     := '0';
-    avs_mm_writedata  : in  std_logic_vector(31 downto 0) := (others=>'0')
+		-- Ports of Axi Slave Bus Interface S00_AXI	
+		s00_axi_clock	: in std_logic;
+        s00_axi_aresetn    : in std_logic;
+        	
+		s00_axi_awaddr	: in std_logic_vector(31 downto 0); -- oke
+		s00_axi_awprot	: in std_logic_vector(2 downto 0);
+		s00_axi_awvalid	: in std_logic; -- oke
+		s00_axi_awready	: out std_logic; -- oke
+		
+		s00_axi_wdata	: in std_logic_vector(31 downto 0); -- oke
+		s00_axi_wstrb	: in std_logic_vector(3 downto 0);
+		s00_axi_wvalid	: in std_logic; -- oke
+		s00_axi_wready	: out std_logic; -- oke
+		
+		s00_axi_bresp	: out std_logic_vector(1 downto 0); -- oke
+		s00_axi_bvalid	: out std_logic; -- oke
+		s00_axi_bready	: in std_logic;
+		
+		s00_axi_araddr	: in std_logic_vector(31 downto 0); -- oke
+		s00_axi_arprot	: in std_logic_vector(2 downto 0);
+		s00_axi_arvalid	: in std_logic; -- oke
+		s00_axi_arready	: out std_logic; -- oke
+		
+		s00_axi_rdata	: out std_logic_vector(31 downto 0); -- oke
+		s00_axi_rresp	: out std_logic_vector(1 downto 0); -- oke
+		s00_axi_rvalid	: out std_logic; -- oke
+		s00_axi_rready	: in std_logic
   );
   
 end mc_s2m;
@@ -91,10 +113,20 @@ architecture arch of mc_s2m is
   signal regReady  : std_logic;
   signal regEnIrq : std_logic;
 
-  signal buf_avs_mm_readdata : std_logic_vector(31 downto 0);
-  signal buf_avs_mm_address : std_logic_vector(gen_log2MemDepth-1 downto 0);
+  signal buf_s00_axi_rdata : std_logic_vector(31 downto 0);
+  signal buf_s00_axi_araddr : std_logic_vector(gen_log2MemDepth-1 downto 0);
+  
+  -- this shift register is used to implement the delay between arvalid and rvalid
+  signal rvalid_shift_reg : std_logic_vector(clk_delays_rvalid downto 0) := (others => '0'); 
+  
+  -- This is a temporary signal. In the final product this needs to be replaced with an AXI signal. Perhaps TUSER.
+  signal avs_mm_irq : std_logic                     := '0';
+  signal s00_axi_arready_i : std_logic := '0';
   
 begin
+  s00_axi_bresp <= "00";
+  s00_axi_bvalid <= '1';
+  s00_axi_rresp <= "00";
 
   -- connect one side of the buffer directly to the mm bus
   pack_buf: simple_dual_port_ram_single_clock
@@ -104,47 +136,53 @@ begin
 	)
   port map(
 	  --General
-	  clk => clk_in_clock,
+	    clk => s00_axi_clock,
 	  --Port A
 		addr_a => bufAddress,
 		data_a => bufData,
 		we_a   => bufWrite,
 	  --Port B
-		addr_b => avs_mm_address,
-		q_b    => buf_avs_mm_readdata
+		addr_b => s00_axi_araddr(gen_log2MemDepth+1 downto 2), -- devide by 4 (or shift 2 bits to the right)
+		q_b    => buf_s00_axi_rdata
 	);
 
 
   -- buffer next signal if necessary
-  avs_mm_readdata <=  regEnIrq &x"0000000" & "00" & regReady when buf_avs_mm_address = std_logic_vector(to_unsigned(0,gen_log2MemDepth)) else buf_avs_mm_readdata;
+  s00_axi_rdata <=  regEnIrq &x"0000000" & "00" & regReady when buf_s00_axi_araddr = std_logic_vector(to_unsigned(0,gen_log2MemDepth)) else buf_s00_axi_rdata;
 
-  asi_st_ready <= not(regReady);
+  s00_axis_tready <= not(regReady);
+  
+  s00_axi_rvalid <= rvalid_shift_reg(0);
 
-  writedata : process(clk_in_clock)
+  s00_axi_arready <= s00_axi_arready_i;
+
+  writedata : process(s00_axi_clock)
   begin
-    if rising_edge(clk_in_clock) then
-      if (reset_in_reset = '1') then
+    if rising_edge(s00_axi_clock) then
+      if (s00_axi_aresetn = '0') then
         avs_mm_irq <= '0';
         bufAddress <= std_logic_vector(to_unsigned(c_packetOffset - 1,gen_log2MemDepth));
         bufData <= (others => '0');
         bufWrite <= '0';
         regEnIrq <= '0';
         regReady <= '0';
+	rvalid_shift_reg <= (others => '0');
+	s00_axi_arready_i <= '0';
       else
 
-        buf_avs_mm_address <= avs_mm_address;
+        buf_s00_axi_araddr <= s00_axi_araddr(gen_log2MemDepth+1 downto 2); -- devide by 4 (or shift 2 bits to the right)
         -- only do something when downstream is ready and I'm not finished
 
-        if ((asi_st_valid = '1') and (regReady = '0')) then
+        if ((s00_axis_tvalid = '1') and (regReady = '0')) then
 
           bufAddress <= std_logic_vector( unsigned(bufAddress) + 1);
 
           -- Data
-          bufData <= asi_st_data;
+          bufData <= s00_axis_tdata;
           bufWrite <= '1';
 
           -- EOP flag when address = length
-          if (asi_st_eop = '1') then
+          if (s00_axis_tlast = '1') then
               avs_mm_irq <= regEnIrq;
               regReady <= '1';           
           end if;
@@ -152,17 +190,28 @@ begin
           bufWrite <= '0';
         end if;
 
-        if ((unsigned(avs_mm_address) = 0) and (avs_mm_write = '1')) then
-          if ((avs_mm_writedata(0) = '0') and (regReady = '1')) then
+		s00_axi_awready <= s00_axi_awvalid and s00_axi_wvalid; 
+		s00_axi_wready <= s00_axi_awvalid and s00_axi_wvalid; 
+
+        if ((unsigned(s00_axi_awaddr) = 0) and (s00_axi_awvalid = '1') and (s00_axi_wvalid = '1')) then
+          if ((s00_axi_wdata(0) = '0') and (regReady = '1')) then
             regReady   <= '0';
             bufAddress <= std_logic_vector(to_unsigned(c_packetOffset - 1,gen_log2MemDepth));
           end if;
-          regEnIrq <= avs_mm_writedata(31);
+          regEnIrq <= s00_axi_wdata(31);
         end if;        
 
-        if ((unsigned(avs_mm_address) = 0) and (avs_mm_read = '1')) then
+		s00_axi_arready_i <= s00_axi_arvalid;
+		
+        if ((unsigned(s00_axi_araddr) = 0) and (s00_axi_arvalid = '1')) then
           avs_mm_irq <= '0';
         end if;
+		
+		-- Obviously ARVALID and RVALID cannot occure during the same clock cycle.
+		-- Thats why we insert a delay of 1 clock cycle between arvalid and rvalid
+		-- (maybe this should be: if(arvalid = '1' and ready = '1') then rvalid = '1' else rvalid = '0'?)
+		rvalid_shift_reg(clk_delays_rvalid - 1 downto 0) <= rvalid_shift_reg(clk_delays_rvalid downto 1);
+		rvalid_shift_reg(clk_delays_rvalid) <= s00_axi_arvalid and not s00_axi_arready_i;
 
       end if;
     end if;
